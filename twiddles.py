@@ -36,10 +36,10 @@ def make_radix2_twiddles(
     half_N = N//2
     t_re = torch.empty(half_N, device=device)
     t_im = torch.empty(half_N, device=device)
-    for k in range(0, half_N):
-        theta = (-2.0 * math.pi * k) / N
-        t_re[k] = torch.cos(theta).to(dtype)
-        t_im[k] = torch.sin(theta).to(dtype)
+    k = torch.arange(N // 2, device=device, dtype=torch.float32)
+    theta = (-2.0 * math.pi * k) / N
+    t_re = torch.cos(theta).to(dtype)
+    t_im = torch.sin(theta).to(dtype)
     return t_re, t_im
 
 
