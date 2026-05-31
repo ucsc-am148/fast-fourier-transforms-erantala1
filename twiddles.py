@@ -33,7 +33,14 @@ def make_radix2_twiddles(
     Used by the radix-2 butterfly: stage s reads twiddle at index
     (k & (2**s - 1)) * (N >> (s+1)), so the table only needs the lower half
     of one full period."""
-    raise NotImplementedError("TODO: implement make_radix2_twiddles")
+    half_N = N//2
+    t_re = torch.empty(half_N, device=device)
+    t_im = torch.empty(half_N, device=device)
+    for k in range(0, half_N):
+        theta = (-2.0 * torch.pi * k) / N
+        t_re[k] = torch.cos(theta, dtype=dtype)
+        t_im[k] = torch.sin(theta, dtype=dtype)
+    return t_re, t_im
 
 
 # =============================================================================
@@ -79,7 +86,31 @@ def make_radix16_twiddles(
     where e_{L-1-j}_value(c) reads the base-16 digit of c at the position
     given by _column_axis_labeling(L)[s].
     """
-    raise NotImplementedError("TODO: implement make_radix16_twiddles")
+    L = math.log(N, 16)
+    tw_re = torch.empty(L, 16, 16)
+    tw_im = torch.empty(L, 16, 16)
+    tw_re[0,:,:], tw_re[0, :, :] = 1.0
+    m = N//16
+    labeling = _column_axis_labeling(L)
+    m_idx = torch.arange(16, device=device, dtype=torch.float32)
+    c_idx = torch.arange(m, device=device, dtype=torch.int32)
+
+    for s in range(1, L):
+        labels = labeling[s]
+        t = torch.zeros(m, dtype=torch.float32, device=device)
+        
+        for j in range(s):
+            i = labels.index(('e', L - 1 - j))
+            digit = (c_idx // (16 ** (L - 2 - i))) % 16
+            t += digit.to(torch.float32) * (16 ** j)
+
+        angle = -2.0 * math.pi * m_idx[:, None] * t[None, :] / (16 ** (s + 1))
+        tw_re[s] = torch.cos(angle)
+        tw_im[s] = torch.sin(angle)
+
+    return tw_re, tw_im
+
+
 
 
 # =============================================================================
@@ -100,7 +131,11 @@ def make_bailey_cross_twiddles(
     F5/F6/F7 call it with dtype=torch.float16 (the tcFFT tier is fp16). The
     Bailey identity holds for any N >= m0 * M; in practice N == m0 * M.
     """
-    raise NotImplementedError("TODO: implement make_bailey_cross_twiddles")
+    # make 2D arange of size (m0, M)
+    tw_idx = torch.arange(0,m0, dtype=dtype, device=device)[:,None] + torch.arange(0,M, dtype=dtype, device=device)[None,:]
+    angle = -2.0 * math.pi * tw_idx / N
+    re, im = torch.cos(angle), torch.sin(angle)
+    return re, im
 
 
 # =============================================================================
@@ -116,7 +151,10 @@ def make_dft_matrix(
 
     W[j, k] = exp(-2*pi*i * j * k / N). Used by F1 (DFT-as-complex-matmul).
     """
-    raise NotImplementedError("TODO: implement make_dft_matrix")
+    jk = torch.arange(0, N, dtype=dtype, device=device)[:,None] + torch.arange(0,N, dtype=dtype, device=device)[None,:]
+    angle = -2.0 * math.pi * jk / N
+    re, im = torch.cos(angle), torch.sin(angle)
+    return re, im
 
 
 def make_dft_R_padded(
@@ -129,8 +167,15 @@ def make_dft_R_padded(
     first R columns are F_R (rows wrap mod R), take the first R output rows.
     This makes the >=16x16 tl.dot requirement hold for all R in {2, 4, 8, 16}.
     """
-    raise NotImplementedError("TODO: implement make_dft_R_padded")
+    F_re, F_im = make_dft_matrix(R, dtype=torch.float16, device=device)
+    M_re = torch.zeros((16, 16), dtype=torch.float16, device=device)
+    M_im = torch.zeros((16, 16), dtype=torch.float16, device=device)
+    rows = torch.arange(16, device=device) % R 
 
+    M_re[:, :R] = F_re[rows, :]
+    M_im[:, :R] = F_im[rows, :]
+
+    return M_re, M_im
 
 def bit_reversal_perm(N: int, device: str = 'cuda') -> torch.Tensor:
     """Length-N bit-reversal permutation as a (N,) int32 tensor.
@@ -138,4 +183,9 @@ def bit_reversal_perm(N: int, device: str = 'cuda') -> torch.Tensor:
     rev[i] is the integer whose n_bits=log2(N) binary representation is i's
     bits in reversed order.
     """
-    raise NotImplementedError("TODO: implement bit_reversal_perm")
+    B = int(math.log2(N))
+    i = torch.arange(N, device=device, dtype=torch.int32)
+    rev = torch.zeros(N, device=device, dtype=torch.int32)
+    for b in range(B):
+        rev |= ((i >> b) & 1) << (B - 1 - b)
+    return rev
