@@ -37,9 +37,9 @@ def make_radix2_twiddles(
     t_re = torch.empty(half_N, device=device)
     t_im = torch.empty(half_N, device=device)
     for k in range(0, half_N):
-        theta = (-2.0 * torch.pi * k) / N
-        t_re[k] = torch.cos(theta, dtype=dtype)
-        t_im[k] = torch.sin(theta, dtype=dtype)
+        theta = (-2.0 * math.pi * k) / N
+        t_re[k] = torch.cos(theta).to(dtype)
+        t_im[k] = torch.sin(theta).to(dtype)
     return t_re, t_im
 
 
@@ -86,10 +86,11 @@ def make_radix16_twiddles(
     where e_{L-1-j}_value(c) reads the base-16 digit of c at the position
     given by _column_axis_labeling(L)[s].
     """
-    L = math.log(N, 16)
-    tw_re = torch.empty(L, 16, 16)
-    tw_im = torch.empty(L, 16, 16)
-    tw_re[0,:,:], tw_re[0, :, :] = 1.0
+    L = int(round(math.log(N, 16)))
+    cols = N // 16
+    tw_re = torch.ones((L, 16, cols), dtype=torch.float16, device=device)
+    tw_im = torch.zeros((L, 16, cols), dtype=torch.float16, device=device)
+
     m = N//16
     labeling = _column_axis_labeling(L)
     m_idx = torch.arange(16, device=device, dtype=torch.float32)
@@ -98,7 +99,7 @@ def make_radix16_twiddles(
     for s in range(1, L):
         labels = labeling[s]
         t = torch.zeros(m, dtype=torch.float32, device=device)
-        
+
         for j in range(s):
             i = labels.index(('e', L - 1 - j))
             digit = (c_idx // (16 ** (L - 2 - i))) % 16
@@ -132,9 +133,10 @@ def make_bailey_cross_twiddles(
     Bailey identity holds for any N >= m0 * M; in practice N == m0 * M.
     """
     # make 2D arange of size (m0, M)
-    tw_idx = torch.arange(0,m0, dtype=dtype, device=device)[:,None] + torch.arange(0,M, dtype=dtype, device=device)[None,:]
-    angle = -2.0 * math.pi * tw_idx / N
-    re, im = torch.cos(angle), torch.sin(angle)
+    n1 = torch.arange(0,m0, dtype=torch.float32, device=device)[:,None]
+    kM = torch.arange(0,M, dtype=torch.float32, device=device)[None,:]
+    angle = -2.0 * math.pi * n1 * kM / N
+    re, im = torch.cos(angle).to(dtype), torch.sin(angle).to(dtype)
     return re, im
 
 
@@ -151,8 +153,9 @@ def make_dft_matrix(
 
     W[j, k] = exp(-2*pi*i * j * k / N). Used by F1 (DFT-as-complex-matmul).
     """
-    jk = torch.arange(0, N, dtype=dtype, device=device)[:,None] + torch.arange(0,N, dtype=dtype, device=device)[None,:]
-    angle = -2.0 * math.pi * jk / N
+    j = torch.arange(0, N, dtype=dtype, device=device)[:,None]
+    k = torch.arange(0,N, dtype=dtype, device=device)[None,:]
+    angle = -2.0 * math.pi * j * k / N
     re, im = torch.cos(angle), torch.sin(angle)
     return re, im
 

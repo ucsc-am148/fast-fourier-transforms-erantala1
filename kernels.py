@@ -145,7 +145,7 @@ def f1_kernel(
         accum_im += im
     
     # store in y
-    output_mask = (offset_b < B) & (offset_n < N)
+    output_mask = (offset_b[:,None] < B) & (offset_n[None,:] < N)
     tl.store(y_re_ptr + offset_b[:,None] * N + offset_n[None,:], accum_re, mask = output_mask)
     tl.store(y_im_ptr + offset_b[:,None] * N + offset_n[None,:], accum_im, mask = output_mask)
 
@@ -160,10 +160,9 @@ def f1_launch(x_re, x_im, W_re, W_im, y_re, y_im):
     TODO: implement.
     """
     BLOCK_M = 16
-    BLOCK_K = 32
+    BLOCK_K = 16
     BLOCK_N = 16
-    B=64
-    N=64
+    B, N = x_re.shape
     grid = (triton.cdiv(B, BLOCK_M), triton.cdiv(N, BLOCK_N),)
 
     f1_kernel[grid](
@@ -264,8 +263,10 @@ def f2_kernel(
         bt_offset = (pid % OUTER_DIM) * N + base_indices
         bt_re = tl.load(bt_re_ptr + bt_offset)
         bt_im = tl.load(bt_im_ptr + bt_offset)
-        x_re = x_re * bt_re - x_im * bt_im
-        x_im = x_re * bt_im + x_im * bt_re
+        tmp_re = x_re
+        tmp_im = x_im
+        x_re = tmp_re * bt_re - tmp_im * bt_im
+        x_im = tmp_re * bt_im + tmp_im * bt_re
 
     # store results 
     # for F2-B do direct strided store
@@ -302,8 +303,8 @@ def f2_launch(x_re, x_im, y_re, y_im, tw_re, tw_im, perm):
             tw_re, tw_im,
             perm,
             tw_re, tw_im,
-            OUTER_DIM=0,
-            TOTAL_DIM=0,
+            OUTER_DIM=1,
+            N_TOTAL=0,
             N=N,
             LOG2_N=LOG2_N,
             BAILEY_EPILOGUE=False,
@@ -694,7 +695,7 @@ def f3_launch(in_re, in_im, out_re, out_im, mid_re, mid_im, plan, B):
             OUTER_DIM = N1,
             N_TOTAL = N,
             N = N2,
-            LOG2_N=LOG2_N1,
+            LOG2_N=LOG2_N2,
             BAILEY_EPILOGUE=True,
             STRIDED_STORE=False,
         )
@@ -712,7 +713,7 @@ def f3_launch(in_re, in_im, out_re, out_im, mid_re, mid_im, plan, B):
             OUTER_DIM = N2,
             N_TOTAL = N,
             N = N1,
-            LOG2_N=LOG2_N2,
+            LOG2_N=LOG2_N1,
             BAILEY_EPILOGUE=False,
             STRIDED_STORE=True,
         )
@@ -795,7 +796,7 @@ def _f6_rec(cur_re, cur_im, rows, chunks, plan, cyc):
     _transpose(cur_re, cur_im, mid_re, mid_im, rows, M, m0)
 
     # recurse with (rows, m0, M), chunks = chunks[1:]
-    rec_re, rec_im = _f6_rec(mid_re, mid_im, rows, chunks[1:], plan, cyc)
+    rec_re, rec_im = _f6_rec(mid_re, mid_im, rows*m0, chunks[1:], plan, cyc)
     
     # scale tw
     scale_re, scale_im = cyc.next()
@@ -835,7 +836,7 @@ def _f7_rec(cur_re, cur_im, rows, chunks, plan, cyc):
     mid_re, mid_im = cyc.next()
     _transpose(cur_re, cur_im, mid_re, mid_im, rows, M, m0)
 
-    rec_re, rec_im = _f6_rec(mid_re, mid_im, rows, chunks[1:], plan, cyc)
+    rec_re, rec_im = _f6_rec(mid_re, mid_im, rows*m0, chunks[1:], plan, cyc)
     
     scale_re, scale_im = cyc.next()
     tw_re, tw_im = _lookup_tw(plan, m0, M, N_i=m0*M)
