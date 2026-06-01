@@ -222,6 +222,7 @@ def f2_kernel(
     base_indices = tl.arange(0, N)
     perm = tl.load(perm_ptr + base_indices)
     offset = pid * N + perm # use perm instead of arange
+
     x_re = tl.load(x_re_ptr + offset)
     x_im = tl.load(x_im_ptr + offset)
     tw_re_loaded = tl.load(tw_re_ptr + tl.arange(0, N//2))
@@ -229,18 +230,15 @@ def f2_kernel(
 
     # all of these comments are me checking one step
     # start algorithm
-    for s in range(0, LOG2_N):
+    for s in tl.static_range(LOG2_N):
         # the indexing rule
         half = 1 << s # for N=8 stage 0 - half = 1
         group_size = 1 << (s+1) # group size = 2
-
-        # get pair indices (a -> a + ib, b -> a - ib)
-        k = base_indices % group_size # [0, 1, 0, 1, 0, 1, 0, 1]
-        j = k % half # [0, 0, 0, 0, 0, 0, 0, 0]
-        a_idx = base_indices - k + j # [0, 0, 2, 2, 4, 4, 6, 6]
-        b_idx = a_idx + half # [1, 1, 3, 3, 5, 5, 7, 7]
-
-        tw_idx = j * (N//group_size) # [0, 0, 0, 0, 0, 0, 0, 0] N=8 stage 0 only has one twiddle
+        k = base_indices % group_size
+        a_idx = base_indices ^ (base_indices & half)
+        b_idx = a_idx + half
+     
+        tw_idx = (base_indices & (half - 1)) * (N >> (s + 1)) # [0, 0, 0, 0, 0, 0, 0, 0] N=8 stage 0 only has one twiddle
         tw_re = tl.gather(tw_re_loaded, tw_idx, axis=0)
         tw_im = tl.gather(tw_im_loaded, tw_idx, axis=0)
 
