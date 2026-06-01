@@ -51,7 +51,7 @@ def _cdot(a_re, a_im, b_re, b_im):
     """
     y_im = tl.dot(a_im, b_re, dtype=tl.float32) + tl.dot(a_re, b_im, dtype=tl.float32)
     y_re = tl.dot(a_re, b_re, dtype=tl.float32) - tl.dot(a_im, b_im, dtype=tl.float32)
-    return (y_re, y_im)
+    return y_re, y_im
 
 
 # =============================================================================
@@ -141,6 +141,7 @@ def f1_kernel(
         W_T_im = tl.load(W_im_ptr + offset_k[:, None] + offset_n[None,:] * N, mask=mask_W, other=0.0)
         
         re, im = _cdot(x_re, x_im, W_T_re, W_T_im)
+
         accum_re += re
         accum_im += im
     

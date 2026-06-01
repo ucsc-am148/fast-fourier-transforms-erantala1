@@ -153,10 +153,10 @@ def make_dft_matrix(
 
     W[j, k] = exp(-2*pi*i * j * k / N). Used by F1 (DFT-as-complex-matmul).
     """
-    j = torch.arange(0, N, dtype=dtype, device=device)[:,None]
-    k = torch.arange(0,N, dtype=dtype, device=device)[None,:]
+    j = torch.arange(0, N, dtype=torch.float32, device=device)[:,None]
+    k = torch.arange(0, N, dtype=torch.float32, device=device)[None,:]
     angle = -2.0 * math.pi * j * k / N
-    re, im = torch.cos(angle), torch.sin(angle)
+    re, im = torch.cos(angle).to(dtype), torch.sin(angle).to(dtype)
     return re, im
 
 
