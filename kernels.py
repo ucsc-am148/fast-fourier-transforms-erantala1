@@ -224,7 +224,8 @@ def f2_kernel(
     offset = pid * N + perm # use perm instead of arange
     x_re = tl.load(x_re_ptr + offset)
     x_im = tl.load(x_im_ptr + offset)
-
+    tw_re = tl.load(tw_re_ptr + tl.arange(0, N//2))
+    tw_im = tl.load(tw_im_ptr + tl.arange(0, N//2))
 
     # all of these comments are me checking one step
     # start algorithm
@@ -240,8 +241,8 @@ def f2_kernel(
         b_idx = a_idx + half # [1, 1, 3, 3, 5, 5, 7, 7]
 
         tw_idx = j * (N//group_size) # [0, 0, 0, 0, 0, 0, 0, 0] N=8 stage 0 only has one twiddle
-        tw_re = tl.load(tw_re_ptr + tw_idx)
-        tw_im = tl.load(tw_im_ptr + tw_idx)
+        tw_re = tl.gather(tw_re, tw_idx, axis=0)
+        tw_im = tl.gather(tw_im, tw_idx, axis=0)
 
         a_re = tl.gather(x_re, a_idx, axis=0) # [x0, x0, x2, x2, x4, x4, x6, x6] (re)
         a_im = tl.gather(x_im, a_idx, axis=0) # [x0, x0, x2, x2, x4, x4, x6, x6] (im)
