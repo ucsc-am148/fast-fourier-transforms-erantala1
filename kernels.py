@@ -49,8 +49,8 @@ def _cdot(a_re, a_im, b_re, b_im):
 
     TODO: implement.
     """
-    y_im = tl.dot(a_im, b_re, dtype=tl.float32) + tl.dot(a_re, b_im, dtype=tl.float32)
-    y_re = tl.dot(a_re, b_re, dtype=tl.float32) - tl.dot(a_im, b_im, dtype=tl.float32)
+    y_im = tl.dot(a_im, b_re, out_dtype=tl.float32) + tl.dot(a_re, b_im, out_dtype=tl.float32)
+    y_re = tl.dot(a_re, b_re, out_dtype=tl.float32) - tl.dot(a_im, b_im, out_dtype=tl.float32)
     return y_re, y_im
 
 
@@ -137,8 +137,9 @@ def f1_kernel(
 
         x_re = tl.load(x_re_ptr + offset_b[:,None] * N + offset_k[None,:], mask=mask_x, other=0.0)
         x_im = tl.load(x_im_ptr + offset_b[:,None] * N + offset_k[None,:], mask=mask_x, other=0.0)
-        W_T_re = tl.load(W_re_ptr + offset_k[:, None] + offset_n[None,:] * N, mask=mask_W, other=0.0) # W is loaded in transposed access (k,n)
-        W_T_im = tl.load(W_im_ptr + offset_k[:, None] + offset_n[None,:] * N, mask=mask_W, other=0.0)
+        W_T_re = tl.load(W_re_ptr + offset_n[None, :] * N + offset_k[:, None], mask=mask_W, other=0.0)
+        W_T_im = tl.load(W_im_ptr + offset_n[None, :] * N + offset_k[:, None], mask=mask_W, other=0.0)
+        
         
         re, im = _cdot(x_re, x_im, W_T_re, W_T_im)
 
@@ -160,9 +161,10 @@ def f1_launch(x_re, x_im, W_re, W_im, y_re, y_im):
 
     TODO: implement.
     """
+    B, N = x_re.shape
     BLOCK_M = 16
-    BLOCK_K = 16
-    BLOCK_N = 16
+    BLOCK_K = 32
+    BLOCK_N = 64
     B, N = x_re.shape
     grid = (triton.cdiv(B, BLOCK_M), triton.cdiv(N, BLOCK_N),)
 
@@ -228,8 +230,8 @@ def f2_kernel(
     # start algorithm
     for s in range(0, LOG2_N):
         # the indexing rule
-        half = 2**s # for N=8 stage 0 - half = 1
-        group_size = 2**(s+1) # group size = 2
+        half = 1 << s # for N=8 stage 0 - half = 1
+        group_size = 1 << (s+1) # group size = 2
 
         # get pair indices (a -> a + ib, b -> a - ib)
         k = base_indices % group_size # [0, 1, 0, 1, 0, 1, 0, 1]
@@ -237,15 +239,15 @@ def f2_kernel(
         a_idx = base_indices - k + j # [0, 0, 2, 2, 4, 4, 6, 6]
         b_idx = a_idx + half # [1, 1, 3, 3, 5, 5, 7, 7]
 
-        tw_idx = j * N//group_size # [0, 0, 0, 0, 0, 0, 0, 0] N=8 stage 0 only has one twiddle
+        tw_idx = j * (N//group_size) # [0, 0, 0, 0, 0, 0, 0, 0] N=8 stage 0 only has one twiddle
         tw_re = tl.load(tw_re_ptr + tw_idx)
         tw_im = tl.load(tw_im_ptr + tw_idx)
 
-        a_re = tl.gather(x_re, a_idx) # [x0, x0, x2, x2, x4, x4, x6, x6] (re)
-        a_im = tl.gather(x_im, a_idx) # [x0, x0, x2, x2, x4, x4, x6, x6] (im)
+        a_re = tl.gather(x_re, a_idx, axis=0) # [x0, x0, x2, x2, x4, x4, x6, x6] (re)
+        a_im = tl.gather(x_im, a_idx, axis=0) # [x0, x0, x2, x2, x4, x4, x6, x6] (im)
 
-        b_re = tl.gather(x_re, b_idx) # [x1, x1, x3, x3, x5, x5, x7, x7] (re)
-        b_im = tl.gather(x_im, b_idx) # [x1, x1, x3, x3, x5, x5, x7, x7] (im)
+        b_re = tl.gather(x_re, b_idx, axis=0) # [x1, x1, x3, x3, x5, x5, x7, x7] (re)
+        b_im = tl.gather(x_im, b_idx, axis=0) # [x1, x1, x3, x3, x5, x5, x7, x7] (im)
 
         # for half = 1 -> lower index is a + and upper index is a - 
         # k = [0, 1, 0, 1, 0, 1, 0, 1] -> [True, False, True, False, ...]
@@ -335,18 +337,18 @@ def transpose_kernel(
     pid_r = tl.program_id(0)
     pid_c = tl.program_id(1)
     pid_b = tl.program_id(2)
-    r_offset = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)[:, None] 
-    c_offset = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)[None, :]
+    r_offset = pid_r * BLOCK_R + tl.arange(0, BLOCK_R)
+    c_offset = pid_c * BLOCK_C + tl.arange(0, BLOCK_C)
 
-    in_offset = pid_b * R * C + r_offset * C + tl.arange(0, BLOCK_C)
-    out_offset = pid_b * R * C + c_offset * R + tl.arange(0, BLOCK_R)
+    in_offset = pid_b * R * C + r_offset[:,None] * C + c_offset[None,:]
+    out_offset = pid_b * R * C + c_offset[None, :] * R + r_offset[:, None]
+    mask = (r_offset[:,None] < R) & (c_offset[None,:] < C)
 
-    in_mask = ((r_offset < R) & (c_offset < C))
-    x_re = tl.load(x_re_ptr + in_offset[:,None], mask = in_mask, other = 0.0)
-    x_im = tl.load(x_im_ptr + in_offset[:,None], mask = in_mask, other = 0.0)
+    x_re = tl.load(x_re_ptr + in_offset, mask = mask, other = 0.0)
+    x_im = tl.load(x_im_ptr + in_offset, mask = mask, other = 0.0)
     
-    tl.store(y_re_ptr + out_offset[None,:], x_re, mask = in_mask)
-    tl.store(y_im_ptr + out_offset[None,:], x_im, mask = in_mask)
+    tl.store(y_re_ptr + out_offset, x_re, mask = mask)
+    tl.store(y_im_ptr + out_offset, x_im, mask = mask)
 
 # =============================================================================
 # F4: tcFFT radix-16 single-program FFT (N = 256, L = 2)
@@ -420,65 +422,86 @@ def f4_kernel_L2(
     # reshape and permute logic, reshape to 3 dims, permute, then flatten last dim
     x_re = tl.reshape(x_re, (BLOCK_B, 16, 16))
     x_im = tl.reshape(x_im, (BLOCK_B, 16, 16))
+    # (B, d0, d1)
     x_re = tl.permute(x_re, (1, 0, 2))
     x_im = tl.permute(x_im, (1, 0, 2))
+    # (d0, B, d1)
     x_re = tl.reshape(x_re, (16, BLOCK_B * 16))
     x_im = tl.reshape(x_im, (16, BLOCK_B * 16))
 
     # length 16 dft over d0 and store as fp16
-    dft_stage_0_re, dft_stage_0_im = _cdot(F_re, F_im, x_re, x_im)
-    dft_stage_0_re = dft_stage_0_re.to(tl.float16)
-    dft_stage_0_im = dft_stage_0_im.to(tl.float16)
-
+    # (e1, B*d1)
+    out_re, out_im = _cdot(F_re, F_im, x_re, x_im)
+    out_re = out_re.to(tl.float16)
+    out_im = out_im.to(tl.float16)  
     # (e1, b, d1)
-    stage_0_out_re = tl.reshape(stage_0_out_re, (16, BLOCK_B, 16))
-    stage_0_out_im = tl.reshape(stage_0_out_im, (16, BLOCK_B, 16))
-    # (e1, b, d1) to (d1, b, e1) to (d1, b * e1)
-    stage_0_out_re = tl.permute(stage_0_out_re, (2, 1, 0))
-    stage_0_out_im = tl.permute(stage_0_out_im, (2, 1, 0))
-    stage_0_out_re = tl.reshape(stage_0_out_re, (16, BLOCK_B * 16))
-    stage_0_out_im = tl.reshape(stage_0_out_im, (16, BLOCK_B * 16))
+    out_re = tl.reshape(out_re, (16, BLOCK_B, 16))
+    out_im = tl.reshape(out_im, (16, BLOCK_B, 16))
 
-    # intermediate step multiply by common twiddle factor w_{256}^{d1e1}
-    # load the second stage, need to offset by * 256
-    tw_offset_row = tl.arange(0,16)[:,None]
-    tw_offset_col = tl.arange(0,16)[None,:]
-    tw_offset = tw_offset_row * 256 + tw_offset_col
-    tw_re = tl.load(tw_re_ptr + tw_offset)
-    tw_im = tl.load(tw_im_ptr + tw_offset)
+    if STAGE_STOP > 1:
+        # (e1, b, d1)
+        out_re = tl.reshape(out_re, (16, BLOCK_B, 16))
+        out_im = tl.reshape(out_im, (16, BLOCK_B, 16))
+        # (e1, b, d1) to (d1, b, e1)
+        out_re = tl.permute(out_re, (2, 1, 0))
+        out_im = tl.permute(out_im, (2, 1, 0))
 
-    # multiply by twiddles element wise for stage 1 input
-    # fp32 * fp16 -> fp32
-    # do twiddle reshape because stage_0_out is (d1, b*e1)
-    tw_re = tl.reshape(tw_re, (16,1,16))
-    tw_im = tl.reshape(tw_im, (16,1,16))
-    stage_1_in_re = stage_0_out_re.to(tl.float32) * tw_re.to(tl.float32) - stage_0_out_im.to(tl.float32) * tw_im.to(tl.float32)
-    stage_1_in_im = stage_0_out_re.to(tl.float32) * tw_im.to(tl.float32) + stage_0_out_im.to(tl.float32) * tw_re.to(tl.float32)
-    
-    # before permute and reshape cast again to fp16
-    stage_1_in_re = stage_1_in_re.to(tl.float16)
-    stage_1_in_im = stage_1_in_im.to(tl.float16)
+        # intermediate step multiply by common twiddle factor w_{256}^{d1e1}
+        # load the second stage, need to offset by * 256
+        tw_offset_row = tl.arange(0,16)[:,None]
+        tw_offset_col = tl.arange(0,16)[None,:]
+        tw_offset = 256 + tw_offset_row * 16 + tw_offset_col
+        tw_re = tl.load(tw_re_ptr + tw_offset)
+        tw_im = tl.load(tw_im_ptr + tw_offset)
 
-    # stage 1 length 16 dft over d1 
-    # output is (e0, b * e1)
-    # fp32 -> fp16
-    stage_1_out_re, stage_1_out_im = _cdot(F_re, F_im, stage_1_in_re, stage_1_in_im)
-    stage_1_out_re = stage_1_out_re.to(tl.float16)
-    stage_1_out_im = stage_1_out_im.to(tl.float16)
+        # multiply by twiddles element wise for stage 1 input
+        # fp32 * fp16 -> fp32
+        # do twiddle reshape because out is (d1, b*e1)
+        tw_re = tl.reshape(tw_re, (16,1,16)).to(tl.float32)
+        tw_im = tl.reshape(tw_im, (16,1,16)).to(tl.float32)
+        tmp_re = out_re.to(tl.float32)
+        tmp_im = out_im.to(tl.float32)
+        out_re = tmp_re * tw_re.to(tl.float32) - tmp_im * tw_im.to(tl.float32)
+        out_im = tmp_re * tw_im.to(tl.float32) + tmp_im * tw_re.to(tl.float32)
+        
+        # before permute and reshape cast again to fp16
+        out_re = out_re.to(tl.float16)
+        out_im = out_im.to(tl.float16)
 
-    # permute (e0, b, e1) to (b, e0, e1)
-    stage_1_out_re = tl.reshape(stage_1_out_re, (16, BLOCK_B, 16))
-    stage_1_out_im = tl.reshape(stage_1_out_im, (16, BLOCK_B, 16))
-    stage_1_out_re = tl.permute(stage_1_out_re, (1, 0, 2))
-    stage_1_out_im = tl.permute(stage_1_out_im, (1, 0, 2))
+        # stage 1 length 16 dft over d1 
+        # output is (e0, b * e1)
+        # fp32 -> fp16
+        out_re = tl.reshape(out_re, (16, BLOCK_B * 16))
+        out_im = tl.reshape(out_im, (16, BLOCK_B * 16))
+        tmp_re, tmp_im = _cdot(F_re, F_im, out_re, out_im)
+        out_re = tmp_re.to(tl.float16)
+        out_im = tmp_im.to(tl.float16)
+
+        # (e0, b, e1)
+        out_re = tl.reshape(out_re, (16, BLOCK_B, 16))
+        out_im = tl.reshape(out_im, (16, BLOCK_B, 16))
+
+    # after stage 0: (e1, b, d1)
+    # after stage 1: (e0, b, e1)
+    out_re = tl.permute(out_re, (1, 0, 2))
+    out_im = tl.permute(out_im, (1, 0, 2))
+    # after stage 0: (b, e1, d1) # e1 is transformed d0 so this checks out
+    # after stage 1: (b, e0, e1)
 
     # back to (b, 256) then store
-    stage_1_out_re = tl.reshape(stage_1_out_re, (BLOCK_B, 256))
-    stage_1_out_im = tl.reshape(stage_1_out_im, (BLOCK_B, 256))
-    out_offset = b_offset[:,None] * 256 + c_offset[None,:]
+    out_re = tl.reshape(out_re, (BLOCK_B, 256))
+    out_im = tl.reshape(out_im, (BLOCK_B, 256))
+
+    if STORE_T:
+        b_outer = b_offset // M
+        m_idx = b_offset % M
+        out_offset = b_outer[:, None] * (256 * M) + c_offset[None, :] * M + m_idx[:, None]
+    else:
+        out_offset = b_offset[:,None] * 256 + c_offset[None,:]
+    
     out_mask = (b_offset[:,None] < B) & (c_offset[None,:] < 256)
-    tl.store(y_re_ptr + out_offset, stage_1_out_re, mask = out_mask)
-    tl.store(y_im_ptr + out_offset, stage_1_out_im, mask = out_mask)
+    tl.store(y_re_ptr + out_offset, out_re, mask = out_mask)
+    tl.store(y_im_ptr + out_offset, out_im, mask = out_mask)
 
 # =============================================================================
 # dft_kernel: padded length-R DFT for the small chunks (R in {2, 4, 8, 16})
@@ -504,10 +527,10 @@ def dft_kernel(
     """
     pid = tl.program_id(0)
     b_offset = pid * BLOCK_B + tl.arange(0, BLOCK_B)
-    r_offset = tl.arange(0, 16)[None, :]
-    x_offset = b_offset[:, None] * R + r_offset
-    M_offset = tl.arange(0, 16)[:, None] * 16 + tl.arange(0, 16)[None, :]
-    mask_x = (b_offset < rows) & (r_offset < R)
+    r_offset = tl.arange(0, 16)
+    x_offset = b_offset[:, None] * R + r_offset[None,:]
+    M_offset = tl.arange(0, 16)[None, :] * 16 + tl.arange(0, 16)[:, None] # this is transposed
+    mask_x = (b_offset[:,None] < rows) & (r_offset[None,:] < R)
 
     x_re = tl.load(x_re_ptr + x_offset, mask = mask_x, other = 0.0)
     x_im = tl.load(x_im_ptr + x_offset, mask = mask_x, other = 0.0)
@@ -518,10 +541,16 @@ def dft_kernel(
     y_re = y_re.to(tl.float16)
     y_im = y_im.to(tl.float16)
 
-    # for STORE_T = False
-    output_mask = (b_offset[:, None] < rows) & (r_offset < R)
-    tl.store(y_re_ptr + x_offset, y_re, mask = output_mask)
-    tl.store(y_im_ptr + x_offset, y_im, mask = output_mask)
+    if STORE_T:
+        b_outer = b_offset // M
+        m_idx = b_offset % M
+        y_offset = b_outer[:, None] * (R * M) + r_offset[None, :] * M + m_idx[:, None]
+    else:
+        y_offset = b_offset[:, None] * R + r_offset[None, :]
+    
+    output_mask = (b_offset[:, None] < rows) & (r_offset[None,:] < R)
+    tl.store(y_re_ptr + y_offset, y_re, mask = output_mask)
+    tl.store(y_im_ptr + y_offset, y_im, mask = output_mask)
 
 
 # =============================================================================
@@ -555,6 +584,7 @@ def bailey_scale_kernel(
     offset_M = pid_M * BLOCK_M + tl.arange(0, BLOCK_M)
     offset_x = pid_rows * m0 * M + offset_m[:, None] * M + offset_M[None,:]
     mask = (offset_m[:,None] < m0) & (offset_M[None,:] < M)
+
     x_re = tl.load(x_re_ptr + offset_x, mask = mask, other = 0.0)
     x_im = tl.load(x_im_ptr + offset_x, mask = mask, other = 0.0)
 
@@ -577,7 +607,7 @@ def bailey_scale_kernel(
 
     # for transpose case swap m0 with M
     if STORE_T:
-        y_offset = pid_rows * m0 * M + offset_M[:,None] * m0 + offset_m[None,:]
+        y_offset = pid_rows * m0 * M + offset_M[None,:] * m0 + offset_m[:, None]
     else:
         y_offset = offset_x
     tl.store(y_re_ptr + y_offset, y_re, mask = mask)
@@ -747,7 +777,7 @@ def f5_launch(in_re, in_im, b0_re, b0_im, b1_re, b1_im, b2_re, b2_im, plan, B):
     _transpose(in_re, in_im, b0_re, b0_im, B, N2, N1)
 
     # FFT-A fft over n2 using f4 with B*N1 rows
-    _fft_chunk(b0_im, b0_im, b1_re, b1_im, B*N1)
+    _fft_chunk(b0_re, b0_im, b1_re, b1_im, B*N1, N2, plan)
 
     # bailey step
     # this was previously fused into F2 (bailey epilouge)
@@ -757,7 +787,7 @@ def f5_launch(in_re, in_im, b0_re, b0_im, b1_re, b1_im, b2_re, b2_im, plan, B):
     _transpose(b0_re, b0_im, b1_re, b1_im, B, N1, N2)
 
     # FFT-B fft over n1 using f4 with B*N2 rows
-    _fft_chunk(b1_re, b1_im, b2_re, b2_im, B*N2)
+    _fft_chunk(b1_re, b1_im, b2_re, b2_im, B*N2, N1, plan)
 
     # third transpose (k2, k1) -> (k1, k2)
     _transpose(b2_re, b2_im, b0_re, b0_im, B, N2, N1)
@@ -787,8 +817,9 @@ def _f6_rec(cur_re, cur_im, rows, chunks, plan, cyc):
     # base case
     if len(chunks) ==1:
         out_re, out_im = cyc.next()
-        _fft_chunk(cur_re, cur_im, out_re, out_im, rows, chunks[0], M=1)
-
+        _fft_chunk(cur_re, cur_im, out_re, out_im, rows, chunks[0], plan)
+        return out_re, out_im
+    
     m0 = chunks[0]
     M = math.prod(chunks[1:])
     mid_re, mid_im = cyc.next()
@@ -831,13 +862,14 @@ def _f7_rec(cur_re, cur_im, rows, chunks, plan, cyc):
     if len(chunks) ==1:
         out_re, out_im = cyc.next()
         _fft_chunk(cur_re, cur_im, out_re, out_im, rows, chunks[0], plan)
+        return out_re, out_im
 
     m0 = chunks[0]
     M = math.prod(chunks[1:])
     mid_re, mid_im = cyc.next()
     _transpose(cur_re, cur_im, mid_re, mid_im, rows, M, m0)
 
-    rec_re, rec_im = _f6_rec(mid_re, mid_im, rows*m0, chunks[1:], plan, cyc)
+    rec_re, rec_im = _f7_rec(mid_re, mid_im, rows*m0, chunks[1:], plan, cyc)
     
     scale_re, scale_im = cyc.next()
     tw_re, tw_im = _lookup_tw(plan, m0, M, N_i=m0*M)
@@ -845,6 +877,6 @@ def _f7_rec(cur_re, cur_im, rows, chunks, plan, cyc):
     _scale(rec_re, rec_im, scale_re, scale_im, rows, m0, M, tw_re, tw_im, store_t = True)
 
     out_re, out_im = cyc.next()
-    _fft_chunk(scale_re, scale_im, out_re, out_im, rows*M, m0, plan, store_t = True)
+    _fft_chunk(scale_re, scale_im, out_re, out_im, rows*M, m0, plan, M=M, store_t = True)
 
     return out_re, out_im
